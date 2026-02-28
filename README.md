@@ -6,3 +6,5 @@ In R
 
 Utilized Bayesian multiple linear and logistic regression techniques (with JAGS) to predict 
 NFL game outcomes based on prior performance metrics (turnovers, scores, yardages, etc.).
+
+There is an RMD file for the JAGS model, one for the continuous model, and one for the logistic model.
