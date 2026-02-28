@@ -1,0 +1,239 @@
+---
+title: "Lions Stats"
+output: pdf_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(coda)
+library(runjags)
+library(ggplot2)
+```
+
+```{r load-data}
+data <- read.csv("NEW_updated_model_data.csv")
+```
+
+```{r model-string}
+# MODEL STRING
+modelString <- "
+model {
+  ## Sampling
+  for (i in 1:N) {
+    y[i] ~ dnorm(beta0 + beta1*x_Offense_TotYd[i] +
+                 beta2*x_Defense_TotYd[i] +
+                 beta3*x_Offense_TO[i] +
+                 beta4*x_Defense_TO[i] +
+                 beta5*x_Team_Score[i] +
+                 beta6*x_Opponent_Score[i], invsigma2)
+  }
+
+  ## Priors
+  beta0 ~ dnorm(mu0, g0)
+  beta1 ~ dnorm(mu1, g1)
+  beta2 ~ dnorm(mu2, g2)
+  beta3 ~ dnorm(mu3, g3)
+  beta4 ~ dnorm(mu4, g4)
+  beta5 ~ dnorm(mu5, g5)
+  beta6 ~ dnorm(mu6, g6)
+  invsigma2 ~ dgamma(a, b)
+  sigma <- sqrt(pow(invsigma2, -1))
+}
+"
+```
+
+```{r data-prep}
+# DATA PREPARATION
+the_data <- list(
+  y = as.vector(data$Win),
+  x_Offense_TotYd = as.vector(data$Offense_TotYd),
+  x_Defense_TotYd = as.vector(data$Defense_TotYd),
+  x_Offense_TO = as.vector(data$Offense_TO),
+  x_Defense_TO = as.vector(data$Defense_TO),
+  x_Team_Score = as.vector(data$Team_Score),
+  x_Opponent_Score = as.vector(data$Opponent_Score),
+  N = nrow(data),    
+  mu0 = 0, g0 = 1,
+  mu1 = 0, g1 = 1,
+  mu2 = 0, g2 = 1,
+  mu3 = 0, g3 = 1,
+  mu4 = 0, g4 = 1,
+  mu5 = 0, g5 = 1,
+  mu6 = 0, g6 = 1,
+  a = 1, b = 1
+)
+
+initsfunction <- function(chain) {
+  .RNG.seed <- c(1, 2)[chain]
+  .RNG.name <- c("base::Super-Duper", "base::Wichmann-Hill")[chain]
+  return(list(.RNG.seed = .RNG.seed, .RNG.name = .RNG.name))
+}
+
+posterior_MLR <- run.jags(
+  modelString,
+  n.chains = 1,
+  data = the_data,
+  monitor = c("beta0","beta1","beta2","beta3","beta4","beta5","beta6","sigma"),
+  adapt = 1000,
+  burnin = 5000,
+  sample = 5000,
+  thin = 60,
+  inits = initsfunction
+)
+```
+
+```{r predict-function}
+# PREDICTION FUNCTION
+
+#   x_Offense_TotYd, x_Defense_TotYd, x_Offense_TO,
+#   x_Defense_TO, x_Team_Score, x_Opponent_Score
+predict_mlr <- function(new_data, post_samples) {
+  beta0 <- post_samples[, "beta0"]
+  beta1 <- post_samples[, "beta1"]
+  beta2 <- post_samples[, "beta2"]
+  beta3 <- post_samples[, "beta3"]
+  beta4 <- post_samples[, "beta4"]
+  beta5 <- post_samples[, "beta5"]
+  beta6 <- post_samples[, "beta6"]
+  sigma <- post_samples[, "sigma"]
+
+  lp <- beta0 +
+    beta1 * new_data$x_Offense_TotYd +
+    beta2 * new_data$x_Defense_TotYd +
+    beta3 * new_data$x_Offense_TO +
+    beta4 * new_data$x_Defense_TO +
+    beta5 * new_data$x_Team_Score +
+    beta6 * new_data$x_Opponent_Score
+
+  y_pred <- rnorm(length(lp), mean = lp, sd = sigma)
+  return(y_pred)
+}
+```
+
+```{r update-function}
+# UPDATE MODEL FUNCTION
+
+update_model <- function(previous_posterior, current_data, new_game) {
+  post_samples <- as.matrix(previous_posterior$mcmc)
+  post_means <- colMeans(post_samples)
+  post_vars <- apply(post_samples, 2, var)
+
+  # Update priors from posterior
+  current_data$mu0 <- post_means["beta0"];  current_data$g0 <- 1 / post_vars["beta0"]
+  current_data$mu1 <- post_means["beta1"];  current_data$g1 <- 1 / post_vars["beta1"]
+  current_data$mu2 <- post_means["beta2"];  current_data$g2 <- 1 / post_vars["beta2"]
+  current_data$mu3 <- post_means["beta3"];  current_data$g3 <- 1 / post_vars["beta3"]
+  current_data$mu4 <- post_means["beta4"];  current_data$g4 <- 1 / post_vars["beta4"]
+  current_data$mu5 <- post_means["beta5"];  current_data$g5 <- 1 / post_vars["beta5"]
+  current_data$mu6 <- post_means["beta6"];  current_data$g6 <- 1 / post_vars["beta6"]
+
+  # Append new game
+  current_data$y <- c(current_data$y,new_game$Win)
+  current_data$x_Offense_TotYd <- c(current_data$x_Offense_TotYd, new_game$x_Offense_TotYd)
+  current_data$x_Defense_TotYd <- c(current_data$x_Defense_TotYd, new_game$x_Defense_TotYd)
+  current_data$x_Offense_TO <- c(current_data$x_Offense_TO,new_game$x_Offense_TO)
+  current_data$x_Defense_TO <- c(current_data$x_Defense_TO, new_game$x_Defense_TO)
+  current_data$x_Team_Score <- c(current_data$x_Team_Score, new_game$x_Team_Score)
+  current_data$x_Opponent_Score<- c(current_data$x_Opponent_Score,new_game$x_Opponent_Score)
+
+  
+  current_data$N <- length(current_data$y)
+
+  updated_posterior <- run.jags(
+    modelString,
+    n.chains = 1,
+    data = current_data,
+    monitor = c("beta0","beta1","beta2","beta3","beta4","beta5","beta6","sigma"),
+    adapt = 1000,
+    burnin = 5000,
+    sample = 5000,
+    thin = 60,
+    inits = initsfunction
+  )
+  return(updated_posterior)
+}
+```
+
+```{r new-games}
+# NEW GAMES
+
+new_games <- list(
+  list(
+    Win = 1,
+    x_Offense_TotYd = 390,
+    x_Defense_TotYd = 268,
+    x_Offense_TO = 0,
+    x_Defense_TO = 0,
+    x_Team_Score = 24,
+    x_Opponent_Score = 6
+  ),
+  list(
+    Win = 0,
+    x_Offense_TotYd = 405,
+    x_Defense_TotYd = 301,
+    x_Offense_TO = 1,
+    x_Defense_TO = 0,
+    x_Team_Score = 23,
+    x_Opponent_Score = 20
+  )
+)
+```
+
+```{r iterate-games}
+# ITERATE THROUGH NEW GAMES
+# FIX: removed add_game_to_data() call — update_model() handles appending internally,
+#      so calling both was adding each game twice.
+predictions_list <- list()
+
+for (i in seq_along(new_games)) {
+  new_game <- new_games[[i]]
+
+  # Predict BEFORE updating with this game's result
+  predictions <- predict_mlr(new_game, as.matrix(posterior_MLR$mcmc))
+  predictions_list[[i]] <- predictions
+
+  print(paste("Predictions for Game", i))
+  print(summary(predictions))
+
+  # FIX: use length(predictions) instead of hardcoded 5000
+  cat("Win probability:", sum(predictions > 0) / length(predictions), "\n\n")
+
+  # Update model with this game's data
+  posterior_MLR <- update_model(posterior_MLR, the_data, new_game)
+
+  # Keep the_data in sync for next iteration
+  the_data$y <- c(the_data$y,new_game$Win)
+  the_data$x_Offense_TotYd <- c(the_data$x_Offense_TotYd, new_game$x_Offense_TotYd)
+  the_data$x_Defense_TotYd <- c(the_data$x_Defense_TotYd, new_game$x_Defense_TotYd)
+  the_data$x_Offense_TO <- c(the_data$x_Offense_TO,new_game$x_Offense_TO)
+  the_data$x_Defense_TO <- c(the_data$x_Defense_TO,new_game$x_Defense_TO)
+  the_data$x_Team_Score <- c(the_data$x_Team_Score,new_game$x_Team_Score)
+  the_data$x_Opponent_Score<- c(the_data$x_Opponent_Score,new_game$x_Opponent_Score)
+  the_data$N <- length(the_data$y)
+}
+```
+
+```{r results-table}
+# RESULTS
+predictions_df <- data.frame(
+  Game = seq_along(predictions_list),
+  Win_Probability  = sapply(predictions_list, function(p) mean(p > 0)),
+  Predicted_Mean = sapply(predictions_list, mean),
+  Predicted_SD = sapply(predictions_list, sd)
+)
+print(predictions_df)
+```
+
+```{r plot-win-prob}
+ggplot(predictions_df, aes(x = Game, y = Win_Probability)) +
+  geom_line() +
+  geom_point(size = 3) +
+  ylim(0, 1) +
+  labs(
+    title = "Predicted Win Probability Over Games",
+    x = "Game Number",
+    y = "Win Probability"
+  ) +
+  theme_minimal()
+```
+
